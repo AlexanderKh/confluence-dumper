@@ -17,11 +17,14 @@ Confluence-dumper is a Python project to export spaces, pages and attachments
 from __future__ import print_function
 import sys
 import codecs
+import re
 
 import os
 import shutil
 from lxml import html
+from lxml.html.builder import *
 from lxml.etree import XMLSyntaxError
+from urllib import unquote
 
 import utils
 import settings
@@ -51,8 +54,12 @@ def derive_downloaded_file_name(download_url):
     :param download_url: Confluence download URL which is used to derive the downloaded file name.
     :returns: Derived file name; if derivation is not possible, None is returned.
     """
+    
     if '/download/' in download_url:
-        download_url_parts = download_url.split('/')
+        cut_download_url = download_url[download_url.find("/download/"):]
+        
+        download_url_parts = cut_download_url.split('/')
+    
         download_page_id = download_url_parts[3]
         download_file_type = download_url_parts[2]
 
@@ -119,10 +126,10 @@ def handle_html_references(html_content, page_duplicate_file_names, page_file_ma
     """
     try:
         html_tree = html.fromstring(html_content)
-    except XMLSyntaxError:
+    except:
         print('%sWARNING: Could not parse HTML content of last page. Original content will be downloaded as it is.'
               % ('\t'*(depth+1)))
-        return html_content
+        return html_content or '';
 
     # Fix links to other Confluence pages
     # Example: /display/TES/pictest1
@@ -149,7 +156,7 @@ def handle_html_references(html_content, page_duplicate_file_names, page_file_ma
     # Fix attachment links
     xpath_expr = '//a[contains(@class, "confluence-embedded-file")]'
     for link_element in html_tree.xpath(xpath_expr):
-        file_url = link_element.attrib['href']
+        file_url = utils.decode_url(link_element.attrib['href'])
         file_name = derive_downloaded_file_name(file_url)
         relative_file_path = '%s/%s' % (settings.DOWNLOAD_SUB_FOLDER, file_name)
         #link_element.attrib['href'] = utils.encode_url(relative_file_path)
@@ -163,14 +170,39 @@ def handle_html_references(html_content, page_duplicate_file_names, page_file_ma
     xpath_expr = '|'.join(possible_image_xpaths)
     for img_element in html_tree.xpath(xpath_expr):
         # Replace file path
-        file_url = img_element.attrib['src']
+        file_url = utils.decode_url(img_element.attrib['src'])
         file_name = derive_downloaded_file_name(file_url)
         relative_file_path = '%s/%s' % (settings.DOWNLOAD_SUB_FOLDER, file_name)
         img_element.attrib['src'] = relative_file_path
 
+        if 'srcset' in img_element.attrib.keys():
+            del img_element.attrib['srcset']
+
+        # Add bigger version of src
+        full_file_path = utils.encode_url(relative_file_path.replace('_thumbnails_', '_attachments_'))
+
+        # Add style element
+        if not 'style' in img_element.attrib.keys():
+            img_element.attrib['style'] = 'max-height: 250px;'
+            if 'width' in img_element.attrib.keys():
+                del img_element.attrib['width']
+            if 'height' in img_element.attrib.keys():
+                del img_element.attrib['height']
+
+        # Remove unneeded attrs
+        for attr in img_element.attrib.keys():
+            if 'data-' in attr:
+                del img_element.attrib[attr]
+
         # Add alt attribute if it does not exist yet
         if not 'alt' in img_element.attrib.keys():
             img_element.attrib['alt'] = relative_file_path
+
+        # Wrap in link
+        parent = img_element.getparent()
+        img_el_index = parent.index(img_element)
+        parent.remove(img_element)
+        parent.insert(img_el_index, A(img_element, href=full_file_path))
 
     return html.tostring(html_tree)
 
